@@ -1,0 +1,32 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pull-secret
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: '{"auths":{"registry.local:5000":{"username":"test","password":"test"}}}'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test
+secrets:
+- name: pull-secret
+imagePullSecrets:
+- name: pull-secret
+---
+apiVersion: kpack.io/v1alpha2
+kind: Image
+metadata:
+  name: sample-image
+spec:
+  tag: registry.local:5000/app
+  serviceAccountName: test
+  builder:
+    name: custom-cluster-builder
+    kind: ClusterBuilder
+  source:
+    git:
+      url: https://github.com/cloudfoundry-samples/cf-sample-app-nodejs
+      revision: master

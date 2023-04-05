@@ -1,0 +1,26 @@
+apiVersion: kpack.io/v1alpha2
+kind: Builder
+metadata:
+  name: custom-builder
+spec:
+  order:
+  - group:
+    - id: paketo-buildpacks/nodejs
+  - group:
+    - id: paketo-buildpacks/bellsoft-liberica
+      kind: Buildpack
+      name: buildpack
+    - id: paketo-buildpacks/gradle
+      optional: true
+    - id: paketo-buildpacks/syft
+    - id: paketo-buildpacks/executable-jar
+    - id: paketo-buildpacks/dist-zip
+    - id: paketo-buildpacks/spring-boot
+  serviceAccountName: test
+  stack:
+    kind: ClusterStack
+    name: stack
+  store:
+    kind: ClusterStore
+    name: store
+  tag: registry.local:5000/kpack-test-4674003324269659332

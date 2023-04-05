@@ -1,0 +1,12 @@
+apiVersion: kpack.io/v1alpha2
+kind: ClusterStore
+metadata:
+  name: store
+spec:
+  sources:
+  - image: gcr.io/paketo-buildpacks/bellsoft-liberica
+  - image: gcr.io/paketo-buildpacks/gradle
+  - image: gcr.io/paketo-buildpacks/syft
+  - image: gcr.io/paketo-buildpacks/executable-jar
+  - image: gcr.io/paketo-buildpacks/dist-zip
+  - image: gcr.io/paketo-buildpacks/spring-boot
