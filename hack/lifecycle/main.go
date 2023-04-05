@@ -19,7 +19,9 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/buildpacks/imgutil/layer"
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
@@ -37,7 +39,8 @@ const (
 )
 
 var (
-	tag = flag.String("tag", "", "tag for lifecycle image")
+	tag     = flag.String("tag", "", "tag for lifecycle image")
+	publish = flag.Bool("publish", true, "publish to remote registry")
 
 	normalizedTime = time.Date(1980, time.January, 1, 0, 0, 1, 0, time.UTC)
 )
@@ -53,12 +56,24 @@ func main() {
 		log.Fatal(err)
 	}
 
-	identifier, err := (&registry.Client{}).Save(authn.DefaultKeychain, *tag, image)
+	var identifier string
+	if *publish {
+		identifier, err = (&registry.Client{}).Save(authn.DefaultKeychain, *tag, image)
+	} else {
+		var localTag name.Tag
+		localTag, err = name.NewTag(*tag)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		identifier = *tag
+		_, err = daemon.Write(localTag, image)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Println(fmt.Sprintf("saved lifecycle image: %s ", identifier))
+	log.Printf("saved lifecycle image: %s \n", identifier)
 
 }
 
