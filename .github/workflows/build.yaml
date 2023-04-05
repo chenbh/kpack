@@ -1,0 +1,244 @@
+name: Build
+
+on:
+  push:
+    branches:
+    - main
+    - release/**
+  pull_request:
+    branches:
+    - main
+    - release/**
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PUBLIC_IMAGE_REPO: gcr.io/cf-build-service-dev-219913/bohanc/kpack
+  # PUBLIC_IMAGE_REPO: gcr.io/cf-build-service-public/kpack
+  PACK_VERSION: 0.29.0
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Run tests
+      run: make unit-ci
+
+    - name: Report coverage
+      run: bash <(curl -s https://codecov.io/bash)
+      env:
+        CODECOV_TOKEN: 4e256ab5-d474-459d-8d4d-cffea6455db7
+
+  build-images-windows:
+    runs-on: windows-2019
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Setup pack
+      run: |
+        url="https://github.com/buildpacks/pack/releases/download/v${{ env.PACK_VERSION }}/pack-v${{ env.PACK_VERSION }}-windows.zip"
+        curl -sSL "$url" -o pack.zip
+        unzip -o pack.zip
+
+        mkdir "${HOME}"/.pack
+        echo "experimental = true" > "${HOME}"/.pack/config.toml
+
+        ./pack version
+
+    - name: Build images
+      run: |
+        export PATH="$PATH:$(pwd)"
+
+        [[ $GITHUB_REF =~ ^refs\/heads\/release\/(.*)$ ]] && version=${BASH_REMATCH[1]} || version=0.0.0
+
+        KPACK_VERSION=$version
+        KPACK_COMMIT=$GITHUB_SHA
+
+        PACK_OPTS="--builder gcr.io/dotnet-build-gcp/go-multios/builder-windows --trust-builder"
+
+        mkdir images
+
+        # usage: pack_save source tag
+        pack_save() {
+          pack build "$2" $PACK_OPTS \
+            --env BP_GO_TARGETS="$1" \
+            --env BP_GO_LDFLAGS="-X 'github.com/pivotal/kpack/cmd.Version=${KPACK_VERSION}' -X 'github.com/pivotal/kpack/cmd.Commit=${KPACK_COMMIT}"
+          docker save $2 > "images/$2.tar"
+        }
+
+        pack_save '.\cmd\completion' completion-windows
+        pack_save '.\cmd\build-init;.\cmd\network-wait-launcher' build-init-windows
+
+    - name: Upload images
+      uses: actions/upload-artifact@v3
+      with:
+        name: images-windows
+        path: images/*.tar
+
+  build-images-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Setup pack
+      uses: buildpacks/github-actions/setup-pack@v5.0.0
+      with:
+        pack-version: ${{ env.PACK_VERSION }}
+
+    - name: Build images
+      run: |
+        [[ $GITHUB_REF =~ ^refs\/heads\/release\/(.*)$ ]] && version=${BASH_REMATCH[1]} || version=0.0.0
+
+        KPACK_VERSION=$version
+        KPACK_COMMIT=$GITHUB_SHA
+        PACK_OPTS="--network host --builder paketobuildpacks/builder-jammy-tiny"
+
+        mkdir images
+
+        # usage: pack_save source tag
+        pack_save() {
+          pack build "$2" $PACK_OPTS \
+            --env BP_GO_TARGETS="$1" \
+            --env BP_GO_LDFLAGS="-X 'github.com/pivotal/kpack/cmd.Version=${KPACK_VERSION}' -X 'github.com/pivotal/kpack/cmd.Commit=${KPACK_COMMIT}"
+          docker save $2 > "images/$2.tar"
+        }
+
+        pack_save ./cmd/controller controller
+        pack_save ./cmd/webhook webhook
+        pack_save ./cmd/build-init build-init
+        pack_save ./cmd/rebase rebase
+        pack_save ./cmd/build-waiter build-waiter
+        pack_save ./cmd/completion completion
+
+        output=$(go run ./hack/lifecycle/main.go --tag=lifecycle --publish=false 2>&1)
+        IMAGE=$(echo "$output" | grep "saved lifecycle" | awk -F  "saved lifecycle image: " '{print $2}')
+        docker save $IMAGE > lifecycle.tar
+
+    - name: Upload images
+      uses: actions/upload-artifact@v3
+      with:
+        name: images-linux
+        path: images/*.tar
+
+  e2e:
+    needs:
+      - build-images-linux
+      - build-images-windows
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Setup crane
+      uses: imjasonh/setup-crane@v0.3
+
+    - name: Setup carvel
+      uses: carvel-dev/setup-action@v1
+      with:
+        only: ytt
+
+    - name: Download images
+      uses: actions/download-artifact@v3
+      with:
+        name: images-linux
+
+    - name: Setup local registry
+      run: |
+        user="test"
+        pass="test"
+
+        echo "Generating user"
+        htpasswd -Bbn "$user" "$pass" > htpasswd
+
+        # the registry can be accessed from inside the kind cluster via it's name.
+        # however, due to a quirk with ggcr, it will force https connections UNLESS
+        # it fits certain patterns (https://github.com/google/go-containerregistry/blob/b8d1c0a1df12a3b3dd3e7f98330780fdc015ce40/pkg/name/registry.go#L75)
+        # so in order to avoid setting tls for the registry, we can name it something.local
+        # to trick ggcr into using the http scheme
+        name="registry.local"
+
+        echo "Starting registry"
+        if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
+          docker run --detach \
+            --name "$name" \
+            --publish "5000:5000" \
+            -v "$(pwd)/htpasswd:/auth/htpasswd" \
+            -e "REGISTRY_AUTH=htpasswd" \
+            -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
+            -e "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd" \
+            registry:2
+        fi
+
+        echo "REGISTRY_URL=$name:5000" >> $GITHUB_ENV
+        echo "REGISTRY_USER=$user" >> $GITHUB_ENV
+        echo "REGISTRY_PASS=$pass" >> $GITHUB_ENV
+
+        # alias registry.local to localhost
+        echo "127.0.0.1 registry.local" | sudo tee -a /etc/hosts
+
+        cat <<EOF > kind.yaml
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        containerdConfigPatches:
+        - |-
+          [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.local:5000"]
+            endpoint = ["http://registry.local:5000"]
+        EOF
+
+    - name: Create Kind Cluster
+      uses: helm/kind-action@v1.5.0
+      with:
+        cluster_name: e2e
+        config: kind.yaml
+
+    - name: Build release yaml
+      run: |
+        # make the registry container accessible by name from inside the cluster
+        docker network connect kind registry.local
+
+        crane auth login ${{ env.REGISTRY_URL }} --username ${{ env.REGISTRY_USER }} --password ${{ env.REGISTRY_PASS }}
+        for image in *.tar; do
+          crane push $image "${{ env.REGISTRY_URL }}/${image%.tar}"
+        done
+
+        ytt -f config/ \
+          -v controller_image=localhost:5000/controller \
+          -v webhook_image=localhost:5000/webhook \
+          -v build_init_image=localhost:5000/build-init \
+          -v build_init_windows_image=not_used \
+          -v build_waiter_image=localhost:5000/build-waiter \
+          -v rebase_image=localhost:5000/rebase \
+          -v completion_image=localhost:5000/completion \
+          -v completion_windows_image=not_used \
+          -v lifecycle_image=localhost:5000/lifecycle > release.yaml
+
+    - name: Run tests
+      run: |
+        kubectl apply -f release.yaml
+
+        export IMAGE_REGISTRY=${{ env.REGISTRY_URL }}
+        export IMAGE_REGISTRY_USERNAME=${{ env.REGISTRY_USER }}
+        export IMAGE_REGISTRY_PASSWORD=${{ env.REGISTRY_PASS }}
+        make e2e
