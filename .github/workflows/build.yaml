@@ -302,3 +302,95 @@ jobs:
 
         make e2e
 
+  release:
+    needs:
+      - unit
+      - e2e
+      - build-images-linux
+      - build-images-windows
+    if: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version-file: 'go.mod'
+
+    - name: Setup crane
+      uses: imjasonh/setup-crane@v0.3
+
+    - name: Setup carvel
+      uses: carvel-dev/setup-action@v1
+      with:
+        token: ${{ secrets.RELEASE_TOKEN }}
+        only: ytt
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Parse branch name
+      run: |
+        echo "GITHUB_REF=${GITHUB_REF}"
+        [[ $GITHUB_REF =~ ^refs\/heads\/release\/(.*)$ ]] && version=${BASH_REMATCH[1]}
+        if [[ -z "${version}" ]]; then
+          echo "ERROR: kpack version not detected."
+          exit 1
+        fi
+        echo "KPACK_VERSION=${version}" >> $GITHUB_ENV
+
+    - name: Publish images
+      env:
+        gcr_token: ${{ secrets.GCR_PUBLIC_SA }}
+      run: |
+        echo "$gcr_token" | crane auth login gcr.io --username _json_key --password-stdin
+
+        mkdir digests
+        for image in **/*.tar; do
+          name=$(basename ${image%.tar})
+          crane push $image "${{ env.PUBLIC_IMAGE_REPO }}/${name}" --image-refs "digests/${name}"
+        done
+
+    - name: Generate release yaml
+      id: release_yaml
+      run: |
+        file="release-${{ env.KPACK_VERSION }}.yaml"
+        ytt -f config/ \
+          -v controller_image=$(cat digests/controller) \
+          -v webhook_image=$(cat digests/webhook) \
+          -v build_init_image=$(cat digests/build-init) \
+          -v build_init_windows_image=$(cat digests/build-init-windows) \
+          -v build_waiter_image=$(cat digests/build-waiter) \
+          -v rebase_image=$(cat digests/rebase) \
+          -v completion_image=$(cat digests/completion) \
+          -v completion_windows_image=$(cat digests/completion-windows) \
+          -v lifecycle_image=$(cat digests/lifecycle) \
+          -v version=${{ env.KPACK_VERSION }} > $file
+
+        echo "sha=$(shasum -a 256 $file)" >> $GITHUB_OUTPUT
+
+    - name: Create Pre-release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: kpack v${{ env.KPACK_VERSION }}
+        tag_name: v${{ env.KPACK_VERSION }}
+        target_commitish: ${{ github.sha }}
+        token: ${{ secrets.RELEASE_TOKEN }}
+        draft: true
+        prerelease: true
+        files: release-*.yaml
+        body: |
+          ## What's Changed
+
+          ## Bug Fixes
+
+          ## Bumped Dependencies
+
+          sha256 checksum:
+          ```
+          ${{ steps.release_yaml.outputs.sha }}
+          ```
+
+          **Full Changelog**:
