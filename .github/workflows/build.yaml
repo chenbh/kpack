@@ -245,7 +245,7 @@ jobs:
         mkdir digests
         for image in *.tar; do
           name=${image%.tar}
-          crane push $image "${{ env.REGISTRY_URL }}/${name}" --image-ref "digests/${name}"
+          crane push $image "${{ env.REGISTRY_URL }}/${name}" --image-refs "digests/${name}"
         done
 
         cat <<EOF > pull-secrets.yaml
