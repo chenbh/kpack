@@ -87,6 +87,59 @@ export KPACK_TEST_NAMESPACE_LABELS="istio-injection=disabled,purpose=test"
 IMAGE_REGISTRY=gcr.io/<some-project> go test ./test/...
 ```
 
+### Running End-to-end Tests Locally
+
+To mimic the E2E tests run via Github Actions, you can setup a kind cluster and
+registry locally.
+
+1. Setup the local registry
+  ```bash
+  user="test"
+  pass="test"
+  htpasswd -Bbn "$user" "$pass" > htpasswd
+
+  name="registry.local"
+  if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
+    docker run --detach \
+      --name "$name" \
+      -v "$(pwd)/htpasswd:/auth/htpasswd" \
+      -e "REGISTRY_AUTH=htpasswd" \
+      -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
+      -e "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd" \
+      -e "REGISTRY_STORAGE_DELETE_ENABLED=true" \
+      --publish "5000:5000" \
+      registry:2
+  fi
+  ```
+1. Setup kind
+  ```bash
+  cat <<EOF > kind.yaml
+  kind: Cluster
+  apiVersion: kind.x-k8s.io/v1alpha4
+  containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."registry.local:5000"]
+      endpoint = ["http://registry.local:5000"]
+  EOF
+
+  kind cluster create --config kind.yaml
+```
+1. Configure the networking
+  ```bash
+  docker network connect kind registry.local
+
+  echo "127.0.0.1 registry.local" | sudo tee -a /etc/hosts
+  ```
+1. Install kpack
+1. Run the tests
+  ```bash
+  export IMAGE_REGISTRY=registry.local:5000/test
+  export IMAGE_REGISTRY_USERNAME=test
+  export IMAGE_REGISTRY_PASSWORD=test
+
+  make e2e
+  ```
+
 ### Libgit2 v1.3.0 Dependency and Installation
 
 Several unit tests depend upon libgit2 v1.3.0.
